@@ -1,0 +1,23 @@
+{
+    "name": "document-service",
+    "version": "0.1.0",
+    "description": "Versioned document templates and generated documents",
+    "main": "src/server.js",
+    "scripts": {
+        "start": "node src/server.js",
+        "test": "node --test",
+        "lint": "eslint .",
+        "coverage": "node --test --experimental-test-coverage"
+    },
+    "dependencies": {
+        "cors": "^2.8.5",
+        "express": "^5.1.0",
+        "jsonwebtoken": "^9.0.2",
+        "pg": "^8.16.3"
+    },
+    "devDependencies": {
+        "@eslint/js": "^9.39.0",
+        "eslint": "^9.39.0",
+        "globals": "^17.12.0"
+    }
+}
