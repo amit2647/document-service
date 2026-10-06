@@ -1,7 +1,7 @@
 const { templates } = require("bundle-sdk");
 
 const pool = require("../config/database");
-const { decide, checksum } = require("./bundleSync");
+const { checksum, customized, decide, optionsFor } = require("./bundleSync");
 const { httpError } = require("./contextService");
 
 /*
@@ -77,7 +77,7 @@ async function insertVersion(client, organizationId, key, shipped, { bundleKey, 
 }
 
 // The install step: PUT /documents/bundles/:key/:version.
-async function installTemplates(organizationId, bundleKey, version, documents = []) {
+async function installTemplates(organizationId, bundleKey, version, documents = [], choices = {}) {
   for (const document of documents) {
     if (!document?.key || !document.name || !document.body) {
       throw httpError(400, "Each document needs a key, a name and a body");
@@ -90,14 +90,14 @@ async function installTemplates(organizationId, bundleKey, version, documents = 
   try {
     await client.query("BEGIN");
 
-    const summary = { inserted: 0, updated: 0, unchanged: 0, kept: 0, retired: 0 };
+    const summary = { inserted: 0, updated: 0, unchanged: 0, kept: 0, retired: 0, customized: [] };
 
     for (const document of documents) {
       const shipped = content(document);
       const row = (
         await client.query("SELECT * FROM document_templates WHERE organization_id = $1 AND key = $2 AND is_current", [organizationId, document.key])
       ).rows[0];
-      const { action, shippedChecksum, flag } = decide(row && { content: content(row), sourceChecksum: row.source_checksum }, shipped);
+      const { action, shippedChecksum, flag, acknowledge } = decide(row && { content: content(row), sourceChecksum: row.source_checksum }, shipped, optionsFor(choices, "document", document.key));
       const options = { bundleKey, source: "bundle", sourceVersion: version, sourceChecksum: shippedChecksum };
 
       if (action === "insert" || action === "update") {
@@ -122,11 +122,13 @@ async function installTemplates(organizationId, bundleKey, version, documents = 
 
         await client.query(
           `UPDATE document_templates SET bundle_key = $1, retired_at = NULL,
-             update_available_version = CASE WHEN $2 THEN $3 ELSE update_available_version END
+             update_available_version = CASE WHEN $5 THEN NULL WHEN $2 THEN $3 ELSE update_available_version END,
+             source_checksum = CASE WHEN $5 THEN $6 ELSE source_checksum END
            WHERE id = $4`,
-          [bundleKey, flag, version, row.id],
+          [bundleKey, flag, version, row.id, Boolean(acknowledge), shippedChecksum],
         );
         summary.kept += 1;
+        if (flag) summary.customized.push(customized("document", document.key, row.name, content(row), shipped, version));
         continue;
       }
 
@@ -145,7 +147,8 @@ async function installTemplates(organizationId, bundleKey, version, documents = 
     );
     summary.retired = retired.rowCount;
 
-    await client.query("COMMIT");
+    // A dry run does all the work and rolls it back, to report what it would do.
+    await client.query(choices.dryRun ? "ROLLBACK" : "COMMIT");
     return summary;
   } catch (error) {
     await client.query("ROLLBACK");

@@ -5,6 +5,7 @@ const requirePermission = require("../middleware/requirePermission");
 const requireBundle = require("../middleware/requireBundle");
 const templateService = require("../services/templateService");
 const documentService = require("../services/documentService");
+const { choicesOf } = require("../services/bundleSync");
 
 const router = express.Router();
 
@@ -71,7 +72,7 @@ router.put(
     const documents = req.body?.documents;
     if (!Array.isArray(documents)) throw bad("documents must be an array");
 
-    return templateService.installTemplates(req.auth.organizationId, req.params.key, req.params.version, documents);
+    return templateService.installTemplates(req.auth.organizationId, req.params.key, req.params.version, documents, choicesOf(req));
   }),
 );
 
