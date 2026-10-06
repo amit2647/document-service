@@ -86,6 +86,15 @@ async function load(organizationId, customerId, period) {
   if (!client) throw httpError(404, "Client not found");
 
   const identifiers = (await pool.query("SELECT type, value FROM customer_identifiers WHERE customer_id = $1", [customerId])).rows;
+  // The portals the client has credentials for, names only (FIX-22).
+  const portals = (
+    await pool.query(
+      `SELECT p.key, p.name FROM portal_credentials c JOIN portals p ON p.id = c.portal_id
+       WHERE c.customer_id = $1 AND c.organization_id = $2 AND p.retired_at IS NULL
+       ORDER BY p.position, p.id`,
+      [customerId, organizationId],
+    )
+  ).rows;
   const people = (
     await pool.query(
       "SELECT role, name, designation, attributes, is_signatory FROM customer_people WHERE customer_id = $1 ORDER BY position, id",
@@ -146,6 +155,7 @@ async function load(organizationId, customerId, period) {
       identifiers: Object.fromEntries(identifiers.map((row) => [row.type, row.value])),
       people: people.map(({ role, name, designation, attributes, is_signatory: isSignatory }) => ({ role, name, designation, attributes: attributes || {}, is_signatory: isSignatory })),
       signatory: signingPerson ? { name: signingPerson.name, designation: signingPerson.designation, attributes: signingPerson.attributes || {} } : {},
+      portals: portals.map(({ key, name }) => ({ key, name })),
     },
     engagement: engagementRow
       ? {
