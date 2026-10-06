@@ -10,6 +10,7 @@
         "coverage": "node --test --experimental-test-coverage"
     },
     "dependencies": {
+        "bundle-sdk": "https://codeload.github.com/amit2647/bundle-sdk/tar.gz/3cd2040c70089c736be22c3e6105d1925820ccf3",
         "cors": "^2.8.5",
         "express": "^5.1.0",
         "jsonwebtoken": "^9.0.2",
