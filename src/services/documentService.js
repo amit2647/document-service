@@ -75,6 +75,10 @@ async function tiles(organizationId, customerId, period) {
       updateAvailable: template.update_available_version,
       enabled,
       reason: enabled ? null : reasonFor(template.enabled_when, catalog),
+      // What the letter depends on, whatever the client: the services its
+      // condition names (a service's Letters tab), and the condition in words.
+      services: template.enabled_when ? conditions.validate(template.enabled_when, "enabledWhen").services : [],
+      needs: template.enabled_when ? reasonFor(template.enabled_when, catalog) : null,
     };
   });
 }
