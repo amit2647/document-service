@@ -1,6 +1,5 @@
 const { describe, test, before, after, beforeEach, mock } = require("node:test");
 const assert = require("node:assert/strict");
-const jwt = require("jsonwebtoken");
 
 /*
  * Documents (DOC-09–15): rendering with pre-filled fields and visible gaps,
@@ -9,8 +8,10 @@ const jwt = require("jsonwebtoken");
  * database in the integration suite.
  */
 
-process.env.JWT_SECRET = "unit-test-secret";
-process.env.JWT_ISSUER = "unit-test-issuer";
+// Hydra's tokens, signed with a test key served as a stubbed JWKS.
+const hydra = require("./helpers/hydraToken");
+
+before(() => hydra.ready);
 process.env.BUNDLE_SERVICE_URL = "http://bundle-service.test";
 
 let installed;
@@ -135,7 +136,7 @@ const call = (method, path, permissions, body) =>
     method,
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${jwt.sign({ sub: 7, organizationId: 3, role: "X", permissions }, process.env.JWT_SECRET, { issuer: process.env.JWT_ISSUER })}`,
+      Authorization: `Bearer ${hydra.sign({ sub: 7, organizationId: 3, role: "X", permissions })}`,
     },
     body: body && JSON.stringify(body),
   });
