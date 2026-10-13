@@ -200,20 +200,168 @@ async function audit(client, organizationId, userId, action, key, details) {
   );
 }
 
-// A firm's own revision of a template's text. Fields stay the bundle's.
-async function editTemplate({ organizationId, userId }, key, body) {
+/*
+ * A firm's own letter (one no bundle ships): the firm sets its name, the
+ * service it is offered for, its fields and its text. Its key starts with
+ * "firm_", so a bundle never ships one of the same name, and an install never
+ * retires it (it has no bundle_key).
+ */
+const FIELD_TYPES = {
+  text: { schema: { type: "string" } },
+  paragraph: { schema: { type: "string" }, ui: { "ui:widget": "textarea" } },
+  date: { schema: { type: "string", format: "date" } },
+  number: { schema: { type: "number" } },
+};
+const FIELD_KEY = /^[a-z][a-z0-9_]{0,59}$/;
+const MAX_FIELDS = 30;
+
+const firmMade = (template) => !template.bundle_key && template.source === "firm";
+
+function slug(text, length) {
+  const value = String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, length).replace(/_+$/, "");
+  return /^[0-9]/.test(value) ? `n_${value}`.slice(0, length) : value;
+}
+
+// The fields as the form edits them, read back from a stored schema.
+function fieldsOf(template) {
+  const properties = template.field_schema?.properties || {};
+  const order = (template.ui?.["ui:order"] || []).filter((key) => properties[key]);
+  const keys = [...order, ...Object.keys(properties).filter((key) => !order.includes(key))];
+
+  return keys.map((key) => {
+    const definition = properties[key];
+    let type = "text";
+    if (definition.type === "number") type = "number";
+    else if (definition.format === "date") type = "date";
+    else if (template.ui?.[key]?.["ui:widget"] === "textarea") type = "paragraph";
+    return { key, title: definition.title || key, type };
+  });
+}
+
+const serviceOf = (template) => (typeof template.enabled_when?.engaged === "string" ? template.enabled_when.engaged : null);
+
+function ownFields(list) {
+  if (list === undefined || list === null) list = [];
+  if (!Array.isArray(list)) throw httpError(400, "fields must be a list");
+  if (list.length > MAX_FIELDS) throw httpError(400, `A letter can have at most ${MAX_FIELDS} fields`);
+
+  const properties = {};
+  const ui = {};
+
+  for (const field of list) {
+    const title = typeof field?.title === "string" ? field.title.trim() : "";
+    if (!title || title.length > 100) throw httpError(400, "Each field needs a name of up to 100 characters");
+    if (!FIELD_TYPES[field.type]) throw httpError(400, `Unknown field type: ${field.type}`);
+
+    // An existing field keeps its key when renamed, so the text still finds it.
+    const key = FIELD_KEY.test(String(field.key || "")) ? field.key : slug(title, 60);
+    if (!key) throw httpError(400, `The field "${title}" needs a name with letters or numbers`);
+    if (properties[key]) throw httpError(400, `Two fields would both be written {{fields.${key}}}; rename one`);
+
+    properties[key] = { ...FIELD_TYPES[field.type].schema, title };
+    if (FIELD_TYPES[field.type].ui) ui[key] = FIELD_TYPES[field.type].ui;
+  }
+
+  return { schema: Object.keys(properties).length ? { type: "object", properties } : {}, ui: Object.keys(ui).length ? ui : null };
+}
+
+// What a firm's own letter holds, checked as a bundle's would be.
+async function ownContent(organizationId, { name, service, fields, body }) {
+  const title = typeof name === "string" ? name.trim() : "";
+  if (!title || title.length > 200) throw httpError(400, "The letter needs a name of up to 200 characters");
   if (typeof body !== "string" || !body.trim()) throw httpError(400, "The template text is required");
 
-  const current = await getCurrent(organizationId, key);
-  checkBody(body, current.field_schema);
+  if (service) {
+    const known = await pool.query("SELECT 1 FROM services WHERE organization_id = $1 AND key = $2", [organizationId, service]);
+    if (known.rowCount === 0) throw httpError(400, "Unknown service");
+  }
 
-  if (body === current.body) return current;
+  const { schema, ui } = ownFields(fields);
+  checkBody(body, schema);
+
+  return { name: title, badge: null, body, fields: schema, ui: withOrder(ui, schema), enabledWhen: service ? { engaged: service } : null };
+}
+
+// A key no letter of this organization has ever used, retired ones included.
+async function freeKey(client, organizationId, name) {
+  const base = `firm_${slug(name, 50) || "letter"}`;
+  const taken = new Set((await client.query("SELECT DISTINCT key FROM document_templates WHERE organization_id = $1 AND key LIKE $2", [organizationId, `${base}%`])).rows.map((row) => row.key));
+
+  let key = base;
+  for (let n = 2; taken.has(key); n += 1) key = `${base}_${n}`;
+  return key;
+}
+
+async function createTemplate({ organizationId, userId }, input = {}) {
+  const shipped = await ownContent(organizationId, input);
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    const key = await freeKey(client, organizationId, shipped.name);
+    const saved = await insertVersion(client, organizationId, key, shipped, { bundleKey: null, source: "firm", current: true, sourceVersion: null, sourceChecksum: null, createdBy: userId });
+    await audit(client, organizationId, userId, "document_template.created", key, { version: saved.version, name: saved.name });
+    await client.query("COMMIT");
+    return saved;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    if (error.code === "23505") throw httpError(409, "Another letter was just added with this name; save again");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+// Only a firm's own letter can go: a bundle would bring its own back.
+async function removeTemplate({ organizationId, userId }, key) {
+  const current = await getCurrent(organizationId, key);
+  if (!firmMade(current)) throw httpError(409, "A bundle's letter cannot be removed; restore its text instead");
 
   const client = await pool.connect();
 
   try {
     await client.query("BEGIN");
-    const saved = await insertVersion(client, organizationId, key, { ...content(current), body }, {
+    await client.query("UPDATE document_templates SET retired_at = NOW() WHERE id = $1 AND retired_at IS NULL", [current.id]);
+    await audit(client, organizationId, userId, "document_template.removed", key, { version: current.version, name: current.name });
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/*
+ * A firm's own revision of a template's text. A bundle letter's fields stay
+ * the bundle's; a firm's own letter may change its name, service and fields too.
+ */
+async function editTemplate({ organizationId, userId }, key, input) {
+  const { body } = typeof input === "string" ? { body: input } : input || {};
+  if (typeof body !== "string" || !body.trim()) throw httpError(400, "The template text is required");
+
+  const current = await getCurrent(organizationId, key);
+  let revised;
+
+  if (firmMade(current)) {
+    revised = await ownContent(organizationId, {
+      name: input.name ?? current.name,
+      service: input.service !== undefined ? input.service : serviceOf(current),
+      fields: input.fields ?? fieldsOf(current),
+      body,
+    });
+    if (checksum(revised) === checksum(content(current))) return current;
+  } else {
+    checkBody(body, current.field_schema);
+    if (body === current.body) return current;
+    revised = { ...content(current), body };
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    const saved = await insertVersion(client, organizationId, key, revised, {
       bundleKey: current.bundle_key,
       source: "firm",
       current: true,
@@ -270,4 +418,7 @@ async function restoreTemplate({ organizationId, userId }, key) {
   }
 }
 
-module.exports = { installTemplates, listCurrent, getCurrent, getVersion, versions, editTemplate, restoreTemplate, checkBody, content, withOrder, checksum };
+module.exports = {
+  installTemplates, listCurrent, getCurrent, getVersion, versions, createTemplate, editTemplate, removeTemplate, restoreTemplate,
+  checkBody, content, withOrder, checksum, firmMade, fieldsOf, serviceOf, ownContent, ownFields,
+};

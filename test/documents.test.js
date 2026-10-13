@@ -31,7 +31,7 @@ pool.query = async (text) => {
 };
 
 const { render, reasonFor, missingIn } = require("../src/services/documentService");
-const { checkBody, content } = require("../src/services/templateService");
+const { checkBody, content, ownFields, ownContent, fieldsOf, withOrder, firmMade } = require("../src/services/templateService");
 const { forget } = require("../src/services/bundleContext");
 
 const TEMPLATE = {
@@ -109,6 +109,54 @@ describe("a firm's template text", () => {
   });
 });
 
+describe("a firm's own letter", () => {
+  const FIELDS = [
+    { title: "Reference number", type: "text" },
+    { title: "Meeting date", type: "date" },
+    { title: "Fee", type: "number" },
+    { title: "Scope of work", type: "paragraph" },
+  ];
+
+  test("its fields become a schema, and read back as the form wrote them", () => {
+    const { schema, ui } = ownFields(FIELDS);
+
+    assert.deepEqual(schema.properties.meeting_date, { type: "string", format: "date", title: "Meeting date" });
+    assert.equal(schema.properties.fee.type, "number");
+    assert.equal(ui.scope_of_work["ui:widget"], "textarea");
+
+    const stored = { field_schema: schema, ui: withOrder(ui, schema) };
+    assert.deepEqual(fieldsOf(stored), FIELDS.map((field, index) => ({ ...field, key: Object.keys(schema.properties)[index] })));
+  });
+
+  test("a renamed field keeps its key, so the text still finds it", () => {
+    const { schema } = ownFields([{ key: "reference_number", title: "Our reference", type: "text" }]);
+    assert.deepEqual(Object.keys(schema.properties), ["reference_number"]);
+  });
+
+  test("refuses fields it cannot name, type or tell apart", () => {
+    for (const fields of [[{ title: "", type: "text" }], [{ title: "Ref", type: "file" }], [{ title: "Ref", type: "text" }, { title: "ref", type: "date" }], [{ title: "???", type: "text" }], "x"]) {
+      assert.throws(() => ownFields(fields), { statusCode: 400 }, JSON.stringify(fields));
+    }
+  });
+
+  test("its text is held to the same rules, against its own fields", async () => {
+    const input = { name: "Engagement reminder", fields: [{ title: "Reference number", type: "text" }] };
+
+    const made = await ownContent(3, { ...input, body: "<p>{{client.name}} {{fields.reference_number}}</p>" });
+    assert.equal(made.enabledWhen, null);
+    assert.deepEqual(made.ui["ui:order"], ["reference_number", "*"]);
+
+    await assert.rejects(ownContent(3, { ...input, body: "<p>{{fields.fee}}</p>" }), { statusCode: 400 });
+    await assert.rejects(ownContent(3, { ...input, body: "<script>x</script>" }), { statusCode: 400 });
+    await assert.rejects(ownContent(3, { ...input, name: " ", body: "<p>x</p>" }), { statusCode: 400 });
+  });
+
+  test("is the firm's only when no bundle installed it", () => {
+    assert.equal(firmMade({ bundle_key: null, source: "firm" }), true);
+    assert.equal(firmMade({ bundle_key: "ca-practice", source: "firm" }), false);
+  });
+});
+
 const app = require("../src/app");
 let server;
 let base;
@@ -154,6 +202,16 @@ describe("routes", () => {
     assert.equal((await call("POST", "/documents", ["documents.read"], { templateKey: "consent_letter", customerId: 5 })).status, 403);
     assert.equal((await call("PUT", "/documents/templates/consent_letter", ["documents.generate"], { body: "x" })).status, 403);
     assert.equal((await call("POST", "/documents/templates/consent_letter/restore", ["documents.generate"])).status, 403);
+  });
+
+  test("adding or removing a letter needs settings", async () => {
+    assert.equal((await call("POST", "/documents/templates", ["documents.generate"], { name: "x", body: "<p>x</p>" })).status, 403);
+    assert.equal((await call("DELETE", "/documents/templates/firm_x", ["documents.generate"])).status, 403);
+    assert.equal((await call("POST", "/documents/templates", ["system.settings"], { name: "x", body: "<p>x</p>", service: "Bad Key" })).status, 400);
+  });
+
+  test("previewing unsaved fields needs settings", async () => {
+    assert.equal((await call("POST", "/documents/preview", ["documents.read"], { templateKey: "x_letter", fields: [] })).status, 403);
   });
 
   test("previewing unsaved template text needs settings too", async () => {

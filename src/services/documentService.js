@@ -72,6 +72,7 @@ async function tiles(organizationId, customerId, period) {
       version: template.version,
       source: template.source,
       customized: template.source === "firm",
+      firmMade: templateService.firmMade(template),
       updateAvailable: template.update_available_version,
       enabled,
       reason: enabled ? null : reasonFor(template.enabled_when, catalog),
@@ -93,19 +94,31 @@ async function templateDetail(organizationId, key) {
     version: template.version,
     source: template.source,
     customized: template.source === "firm",
+    firmMade: templateService.firmMade(template),
     updateAvailable: template.update_available_version,
     body: template.body,
     ...fieldDefinitions(template),
+    // A firm's own letter, as its form edits it.
+    ...(templateService.firmMade(template) ? { service: templateService.serviceOf(template), fieldList: templateService.fieldsOf(template) } : {}),
     versions: await templateService.versions(organizationId, key),
   };
 }
 
 /*
  * Nothing stored. `body` previews an unsaved edit of the template text (the
- * template editor); it is checked exactly as a save would check it.
+ * template editor); it is checked exactly as a save would check it. `fields`
+ * previews a firm's own letter's unsaved fields, and with no `templateKey`
+ * a letter not yet created.
  */
-async function preview(organizationId, { templateKey, customerId, period, fieldValues, body }) {
-  const template = await templateService.getCurrent(organizationId, templateKey);
+async function preview(organizationId, { templateKey, customerId, period, fieldValues, body, fields }) {
+  let template = templateKey
+    ? await templateService.getCurrent(organizationId, templateKey)
+    : { name: "New letter", badge: null, field_schema: {}, ui: null, body: "" };
+
+  if (fields !== undefined) {
+    const own = templateService.ownFields(fields);
+    template = { ...template, field_schema: own.schema, ui: templateService.withOrder(own.ui, own.schema) };
+  }
 
   if (body !== undefined) templateService.checkBody(body, template.field_schema);
 

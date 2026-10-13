@@ -53,6 +53,13 @@ function itemKey(value) {
   return value;
 }
 
+// A service's catalog key; the service checks it exists.
+function optionalItem(value, message) {
+  if (value === undefined || value === null || value === "") return null;
+  if (!/^[a-z0-9][a-z0-9_]{0,79}$/.test(String(value))) throw bad(message);
+  return value;
+}
+
 function period(value) {
   if (value === undefined || value === null || value === "") return null;
   if (!/^\d{4}(-\d{2})?$/.test(String(value))) throw bad("Invalid period");
@@ -89,14 +96,43 @@ router.get(
   respond((req) => documentService.templateDetail(req.auth.organizationId, itemKey(req.params.key))),
 );
 
-// A firm's own revision of a template's text.
+// A firm's own letter, which no bundle ships.
+router.post(
+  "/documents/templates",
+  ...gated("system.settings"),
+  respond(async (req, res) => {
+    const body = req.body || {};
+    const created = await templateService.createTemplate(auth(req), {
+      name: body.name,
+      service: optionalItem(body.service, "Invalid service key"),
+      fields: body.fields,
+      body: body.body,
+    });
+    res.status(201);
+    return documentService.templateDetail(req.auth.organizationId, created.key);
+  }),
+);
+
+// A firm's own revision of a template's text (and, for its own letter, name, service and fields).
 router.put(
   "/documents/templates/:key",
   ...gated("system.settings"),
   respond(async (req) => {
-    await templateService.editTemplate(auth(req), itemKey(req.params.key), req.body?.body);
+    const body = req.body || {};
+    await templateService.editTemplate(auth(req), itemKey(req.params.key), {
+      body: body.body,
+      name: body.name,
+      service: body.service === undefined ? undefined : optionalItem(body.service, "Invalid service key"),
+      fields: body.fields,
+    });
     return documentService.templateDetail(req.auth.organizationId, req.params.key);
   }),
+);
+
+router.delete(
+  "/documents/templates/:key",
+  ...gated("system.settings"),
+  respond((req) => templateService.removeTemplate(auth(req), itemKey(req.params.key))),
 );
 
 router.post(
@@ -115,18 +151,20 @@ router.post(
   respond((req) => {
     const body = req.body || {};
 
-    if (body.body !== undefined && !req.auth.permissions.includes("system.settings")) {
+    if ((body.body !== undefined || body.fields !== undefined) && !req.auth.permissions.includes("system.settings")) {
       const error = new Error("Previewing template text needs the settings permission");
       error.statusCode = 403;
       throw error;
     }
 
     return documentService.preview(req.auth.organizationId, {
-      templateKey: itemKey(body.templateKey),
+      // A letter not yet created previews from its text alone.
+      templateKey: body.templateKey === undefined && body.body !== undefined ? null : itemKey(body.templateKey),
       customerId: optionalId(body.customerId),
       period: period(body.period),
       fieldValues: body.fieldValues && typeof body.fieldValues === "object" ? body.fieldValues : {},
       body: body.body,
+      fields: body.fields,
     });
   }),
 );
